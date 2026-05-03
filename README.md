@@ -1,4 +1,4 @@
-# Inventory Reservation System — Beeyond Code Challenge
+# Inventory Reservation System — Code Challenge
 
 Sistema de reservas atómicas de inventario para escenarios de flash sale, con TTL de 60 segundos, idempotencia obligatoria y cero overselling bajo carga concurrente.
 

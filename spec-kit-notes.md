@@ -1,6 +1,6 @@
 # Spec Kit Notes — Sistema de Reservas de Inventario
 
-Este documento registra el proceso de aplicación del **Spec Kit Workflow** durante el desarrollo del reto "Inventory Reservation System" para Beeyond Media. Su propósito es triple: dejar trazabilidad de decisiones de diseño, documentar las asunciones tomadas ante ambigüedades del enunciado, y servir como bitácora de pivots y refinamientos.
+Este documento registra el proceso de aplicación del **Spec Kit Workflow** durante el desarrollo del reto "Inventory Reservation System" para un cliente externo. Su propósito es triple: dejar trazabilidad de decisiones de diseño, documentar las asunciones tomadas ante ambigüedades del enunciado, y servir como bitácora de pivots y refinamientos.
 
 Es un documento vivo: cada fase del workflow añade entradas a las secciones correspondientes mediante commits dedicados.
 

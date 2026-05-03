@@ -55,6 +55,30 @@ El sistema implementa un mecanismo de reservas temporales de inventario diseñad
 
 ## 6. Criterios de aceptación
 
+### 6.1 Orden de validación en POST /reservations
+
+Las validaciones del handler `POST /reservations` se ejecutan en este orden estricto. La primera que falla detiene el procesamiento y retorna su error correspondiente, evitando queries innecesarias a la base de datos:
+
+1. `X-User-Id` presente y UUID v4 válido         → `INVALID_USER_ID`
+2. `Idempotency-Key` presente y no vacío         → `MISSING_IDEMPOTENCY_KEY`
+3. `Idempotency-Key` ≤ 256 chars y caracteres imprimibles → `INVALID_IDEMPOTENCY_KEY`
+4. JSON body parseable                            → `INVALID_REQUEST_BODY`
+5. `item_id` presente y UUID v4 válido           → `INVALID_ITEM_ID`
+6. `quantity` entero positivo                     → `INVALID_QUANTITY`
+7. Idempotency check: la `key` existe en el store → 200 OK con response cacheado, o 422 `IDEMPOTENCY_CONFLICT` si hash de payload difiere
+8. `item_id` existe en DB                         → `ITEM_NOT_FOUND`
+9. `UPDATE` atómico con guarda `available >= quantity` → `OUT_OF_STOCK` si `rowsAffected = 0`
+
+**Rationale**: el orden es defensivo. Primero se validan headers de identidad, luego sintaxis del request, luego semántica del payload, y finalmente estado de la base de datos. Esto minimiza carga sobre PostgreSQL ante requests malformados y evita exponer detalles internos por timing.
+
+Para `DELETE /reservations/{id}` el orden es:
+
+1. `X-User-Id` presente y UUID v4 válido         → `INVALID_USER_ID`
+2. `id` en path es UUID v4 válido                → `INVALID_RESERVATION_ID`
+3. La reserva existe Y pertenece al `X-User-Id`  → `RESERVATION_NOT_FOUND` (404 indistinto entre "no existe" y "no es tuya", para no filtrar información)
+4. La reserva NO está en estado `expired`        → `RESERVATION_EXPIRED` (410)
+5. `UPDATE` atómico con guarda `status='active'` → `already_released` si `rowsAffected = 0`
+
 ### AC-001: Listado de inventario devuelve items con total, reserved, available
 **DADO** que existen items en la base de datos con stock seed
 **CUANDO** el cliente solicita `GET /items`
@@ -185,6 +209,13 @@ El sistema implementa un mecanismo de reservas temporales de inventario diseñad
 **ENTONCES** el response es 409 Conflict con código `OUT_OF_STOCK` inmediatamente
 **Y** el sistema no realiza ningún intento de UPDATE redundante
 
+### AC-021: DELETE de reserva con X-User-Id distinto al dueño
+**DADO** una reserva creada por el usuario A
+**CUANDO** el usuario B (con `X-User-Id` distinto al de A) envía `DELETE /reservations/{id}`
+**ENTONCES** el response es 404 Not Found con código `RESERVATION_NOT_FOUND`
+**Y** la reserva NO se modifica
+**Y** el sistema NO revela la existencia de reservas de otros usuarios
+
 ## 7. Edge cases explícitos
 
 ### EC-01: Reintento de POST con misma Idempotency-Key después de expiración
@@ -271,6 +302,16 @@ Nota: `available` es un valor calculado como `total - reserved`. No se persiste 
 
 TTL operacional de 24h, limpiado por la goroutine de mantenimiento.
 
+### 8.1 Validación de identificadores UUID
+
+Todos los headers y campos UUID del API se validan como **UUID v4 estricto**: formato `8-4-4-4-12` hexadecimal, con `4` en la posición de versión y `8|9|a|b` en la variante. UUIDs v1, v3, v5, o strings con formato UUID pero versión distinta de v4 retornan:
+
+- `INVALID_USER_ID` para el header `X-User-Id`
+- `INVALID_ITEM_ID` para el campo `item_id` del body
+- `INVALID_RESERVATION_ID` para el parámetro `id` del path en `DELETE /reservations/{id}`
+
+**Rationale**: aceptar solo UUID v4 reduce la superficie de ambigüedad y elimina la necesidad de validación cruzada entre versiones de UUID. La generación en cliente (`crypto.randomUUID()` en navegadores modernos) produce v4 por defecto.
+
 ## 9. Contrato de API
 
 El contrato HTTP completo (schemas, parámetros, ejemplos, códigos de respuesta) está definido en `specs/reservation/openapi.yaml`. Resumen de endpoints:
@@ -285,6 +326,28 @@ El contrato HTTP completo (schemas, parámetros, ejemplos, códigos de respuesta
 Headers comunes:
 - `X-User-Id`: UUID v4. Requerido en `POST /reservations`, `DELETE /reservations/{id}` y `GET /reservations`.
 - `Idempotency-Key`: string opaco, ≤256 chars. Requerido en `POST /reservations`.
+
+## 9.1 Catálogo completo de códigos de error
+
+Lista actualizada de códigos `code` retornados por el API (machine-readable, estables para versionado):
+
+| Código                          | HTTP | Origen                                                |
+|---------------------------------|------|-------------------------------------------------------|
+| INVALID_USER_ID                 | 400  | Header `X-User-Id` ausente, vacío o no UUID v4        |
+| MISSING_IDEMPOTENCY_KEY         | 400  | Header `Idempotency-Key` ausente o vacío en POST      |
+| INVALID_IDEMPOTENCY_KEY         | 400  | `Idempotency-Key` excede 256 chars o tiene no-printables |
+| INVALID_REQUEST_BODY            | 400  | JSON malformado o tipo incorrecto                     |
+| INVALID_ITEM_ID                 | 400  | `item_id` ausente o no UUID v4                        |
+| INVALID_RESERVATION_ID          | 400  | `id` en path no es UUID v4                            |
+| INVALID_QUANTITY                | 400  | `quantity` no entero o ≤ 0                            |
+| ITEM_NOT_FOUND                  | 404  | `item_id` no existe en DB                             |
+| RESERVATION_NOT_FOUND           | 404  | Reserva no existe o pertenece a otro usuario          |
+| OUT_OF_STOCK                    | 409  | `available < quantity`                                |
+| RESERVATION_EXPIRED             | 410  | DELETE sobre reserva en estado `expired`              |
+| RESERVATION_ALREADY_RELEASED    | 200  | DELETE sobre reserva en estado `released` (no es error, es no-op informativo en el body) |
+| IDEMPOTENCY_CONFLICT            | 422  | Misma `Idempotency-Key`, payload distinto             |
+
+Nota: `RESERVATION_ALREADY_RELEASED` se devuelve con HTTP 200 dentro del campo `status` del response (`{"status":"already_released"}`), no como error en el envelope `{code, message}`. Es la única excepción al patrón.
 
 ## 10. Preguntas abiertas y asunciones
 

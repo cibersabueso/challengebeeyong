@@ -114,9 +114,64 @@ Cualquier modificación de `items.total` fuera del API es responsabilidad del op
 
 ## 5. Pivots
 
-Esta sección documenta cualquier cambio de rumbo significativo durante el desarrollo. Cada entrada describe el contexto, qué se intentó originalmente, por qué falló, y qué se hizo en su lugar.
+Esta sección documenta los cambios de rumbo significativos durante el desarrollo, con foco en las decisiones que **se tomaron diferente a lo planificado** en fases anteriores.
 
-*A la fecha de Fase 2 no se han producido pivots. Todas las decisiones tomadas en Fase 0 a Fase 2 se mantienen sin modificación. Esta sección se actualizará en commits posteriores si surgen pivots durante Plan, Tasks o Implementation.*
+### P-01: Stack del frontend bajado de bleeding-edge a LTS estable
+
+**Contexto**: en el Bloque 7 (Frontend Setup), `npm create vite@latest` con flag `react-ts` pinneó por defecto un stack agresivo: React 19.2, TypeScript 6.0 alpha, ESLint 10, con flags de TS 5.7+ habilitados.
+
+**Decisión original (plan.md)**: "Vite 5.x, React 18.x, TypeScript 5.x con strict mode".
+
+**Pivot**: bajar manualmente a React 18.3.1, TypeScript 5.6.3, ESLint 9.13, Vite 5.4. Eliminar el flag `erasableSyntaxOnly` del `tsconfig.node.json` que requiere TS 5.7+.
+
+**Razón**: el ecosistema de TanStack Query 5 y Testing Library 16 está al 100% probado contra React 18.3 LTS. Apuntar a React 19 introduce riesgos de incompatibilidad cuyos costos de debug exceden cualquier beneficio para un proyecto con time budget de 8-10 horas. El plan original lo anticipaba con la frase "React 18.x"; el pivot fue rechazar la sugerencia del scaffold y mantener la versión estable.
+
+### P-02: Augmentation de Vitest 4 cambia respecto a Vitest 3
+
+**Contexto**: el plan original especificaba `vite.config.ts` con un comentario `/// <reference types="vitest" />` para que TypeScript reconociera el bloque `test` del config. Esta sintaxis era válida en Vitest 3 pero rompe en Vitest 4.
+
+**Pivot**: importar `defineConfig` desde `vitest/config` en lugar de `vite`. Esto aporta los tipos del bloque `test` automáticamente sin necesidad del triple-slash directive.
+
+**Razón**: cambio de superficie pública de la librería entre majors. No afecta la lógica del proyecto; es un detalle de tipado.
+
+### P-03: --passWithNoTests para suite vacía durante el setup
+
+**Contexto**: Vitest 4 cambió el comportamiento default cuando no hay archivos de test: ahora sale con código 1 en lugar de 0. Esto rompía el smoke test del Bloque 7 que requería que `npm test` terminara con código 0 antes de tener tests.
+
+**Pivot**: añadir `--passWithNoTests` al script `test` del `package.json`.
+
+**Razón**: el bloque de setup necesita validar que el runner está cableado correctamente sin tests aún. Sin esta flag, el setup falla y bloquea el avance al Bloque 8.
+
+### P-04: bytes.NewReader en lugar de helper custom para body parsing
+
+**Contexto**: en el Bloque 4 el prompt original incluía un mini-helper `bytesReader` para evitar añadir el import de `bytes` solo para `bytes.NewReader`. El prompt explícitamente permitía optar por `bytes.NewReader` "si se prefiere por simplicidad".
+
+**Pivot**: usar `bytes.NewReader` de stdlib.
+
+**Razón**: el helper custom era over-engineering para evitar un import trivial. Stdlib gana en legibilidad y mantenibilidad.
+
+### P-05: Borrado de App.css demo y assets de Vite
+
+**Contexto**: el scaffold de Vite incluye un `App.css` con estilos demo y assets en `src/assets/` (react.svg, vite.svg) y `public/` (icons.svg, hero.png) que el nuevo `App.tsx` no usa. Inicialmente quedaron commiteados por inercia tras el Bloque 7.
+
+**Pivot**: borrarlos en el Bloque 11 final como parte del cleanup de cierre.
+
+**Razón**: aunque no afectan al build (tree-shaking elimina el código no referenciado), dejan archivos innecesarios en el repo público. Un repo profesional no incluye assets demo sin referencia.
+
+### Decisiones del plan que se mantuvieron sin modificación
+
+Para contexto, las siguientes decisiones del `plan.md` se ejecutaron exactamente como estaban planificadas, sin pivot:
+
+- `UPDATE ... WHERE available >= $qty` como mecanismo de concurrencia (D-01).
+- `pgx/v5` como driver, sin `database/sql` ni ORM (D-02).
+- Migrations con `golang-migrate/migrate` embebido en el binario (D-03).
+- `slog` stdlib como logger estructurado (D-04).
+- TanStack Query con `refetchInterval: 2000` (D-05).
+- Tailwind CSS sin libs de UI (D-06).
+- Tests con Postgres local + DB dedicada `challengebeeyong_test` y TRUNCATE entre tests (D-07).
+- Vitest + Testing Library (D-08).
+- 21 ACs y 8 edge cases del spec se implementaron al 100%.
+- Las 8 asunciones documentadas (A-01 a A-09) se mantuvieron coherentes en código.
 
 ## 6. Comandos y prompts relevantes pasados al agente
 
@@ -141,6 +196,32 @@ Lista de prompts significativos pasados a Claude Code, en orden cronológico. Se
   3. Agregar sección 8.1 con validación estricta de UUID v4.
   4. Agregar sección 9.1 con catálogo completo de códigos de error.
 - **Iteraciones**: 1. Resultado: 364 líneas (de 301), 21 ACs (de 20), sin renumeraciones ni rupturas de formato.
+
+### Fase 5 — Implementación
+
+La Fase 5 se ejecutó en 11 bloques temáticos, cada uno con su commit dedicado. Cada prompt al agente seguía la misma estructura: contexto del bloque, reglas de código, archivos a crear con su contenido EXACTO, smoke test obligatorio antes de finalizar. El agente NO podía ejecutar `git add` ni `git commit`; el commit se hacía manualmente solo tras revisión del diff.
+
+**Bloque 1 — Backend Infra (T-001 a T-006)**: `go.mod`, config, pool de pgx, migraciones SQL crudas, seed con 6 items alineados al mockup, scaffold de `main.go`. Smoke test: arranque del binario muestra los 5 logs estructurados esperados (migrations applied, database pool ready, seed applied, server scaffold ready, shutting down) y `SELECT COUNT(*) FROM items` retorna 6.
+
+**Bloque 2 — Backend Domain + Repos (T-007 a T-014)**: tipos puros, 13 errores tipados, 3 repositorios con queries SQL atómicas como constantes con nombre. Decisión clave: introducir una interfaz `Executor` que satisfacen tanto `*pgxpool.Pool` como `pgx.Tx`, para que los repos participen transparentemente en transacciones del service layer. Smoke test: `go build ./...` silencioso.
+
+**Bloque 3 — Backend Service + Idempotency (T-015 a T-020)**: `CanonicalHash` con sort recursivo de keys + SHA-256, `ReservationService.Create` con flujo idempotency-first → tx con AtomicDecrement → Insert → Persist (con manejo de race contra PK 23505), `Release` y `ListByUser`, helper `LogStockMutation` para observabilidad.
+
+**Bloque 4 — Backend HTTP (T-021 a T-026)**: chi router con middleware chain (RequestID, RealIP, Logger, Recoverer, Timeout 15s), middleware `RequireUserID` que valida UUID v4 estricto e inyecta el ID parseado en el context, handlers para los 4 endpoints aplicando el orden estricto de validación de spec.md sección 6.1, mapping de errores de dominio a HTTP status según spec.md sección 9.1. Smoke test: 4 curl directos contra el server validando los códigos de error con cada combinación de headers.
+
+**Bloque 5 — Backend TTL (T-027 a T-029)**: `expiry.Service` con `RunOnce`, `Loop` (ticker + select sobre ctx.Done) y `Bootstrap` sincrónico. Wired en `main.go` antes del HTTP listener (cubre EC-06). Smoke test: insertar reserva con `expires_at` en el pasado → arrancar el servidor → verificar que la reserva queda `expired` y el stock se devuelve antes de aceptar tráfico, confirmado por orden de logs.
+
+**Bloque 6 — Backend Tests (T-030 a T-034)**: helper `testutil` con `NewTestDB`, `Reset`, `SeedItem`, `NewServer` (httptest con la misma cadena de handlers que producción) y `findMigrationsDir` para resolver el path en cualquier package. 6 tests ejecutándose con `-race -count=1`: los 4 obligatorios del enunciado más bootstrap cleanup y cross-user DELETE. Todos verifican invariantes vía SELECT directo a DB. Race detector cero warnings.
+
+**Bloque 7 — Frontend Setup (T-035 a T-038)**: Vite scaffold + Tailwind + TanStack Query + Vitest. Aquí surgió el primer **pivot real** (ver sección Pivots).
+
+**Bloque 8 — Frontend API + Hooks (T-039 a T-043)**: `lib/uuid.ts`, `lib/errors.ts` con `ApiError` tipado, cliente HTTP que parsea automáticamente `{code, message}` del backend, hooks de TanStack Query con `refetchInterval: 2000` y mutations que generan `Idempotency-Key` con `crypto.randomUUID()` por invocación. Compilación bajo TS strict + noUncheckedIndexedAccess al primer intento.
+
+**Bloque 9 — Frontend Components (T-044 a T-049)**: 8 componentes (Toast, StatusBadge, Skeleton, ItemCard con stepper, InventoryGrid, ReservationItem con countdown color-coded, ReservationsPanel, App.tsx reescrito). Layout 2 columnas alineado al mockup del PDF (inventory grid + sidebar de 320px). Bundle final 197 kB JS / 12 kB CSS, gzip 62 kB / 3.2 kB.
+
+**Bloque 10 — Frontend Tests (T-050 a T-052)**: 11 tests de Vitest cubriendo los 3 obligatorios del enunciado (timer logic, reserve flow happy path, error state). Mocks con `vi.fn`, fake timers para countdown, `userEvent` para clicks reales.
+
+**Bloque 11 — Cierre (T-053 a T-055)**: `README.md` raíz, actualización de este archivo, cleanup de assets demo de Vite, smoke test end-to-end final.
 
 ## 7. Trazabilidad
 

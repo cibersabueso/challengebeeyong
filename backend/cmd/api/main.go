@@ -5,18 +5,27 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/go-chi/chi/v5"
+	chiware "github.com/go-chi/chi/v5/middleware"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/cibersabueso/challengebeeyong/backend/internal/config"
+	"github.com/cibersabueso/challengebeeyong/backend/internal/handler"
 	"github.com/cibersabueso/challengebeeyong/backend/internal/platform"
+	"github.com/cibersabueso/challengebeeyong/backend/internal/repository"
+	"github.com/cibersabueso/challengebeeyong/backend/internal/service"
 )
+
+const reservationTTLSeconds = 60
 
 func main() {
 	if err := run(); err != nil {
@@ -55,10 +64,61 @@ func run() error {
 		return fmt.Errorf("seed: %w", err)
 	}
 
-	slog.InfoContext(ctx, "server scaffold ready (handlers will be wired in next blocks)", "port", cfg.Port)
+	itemRepo := repository.NewItemRepository(pool)
+	reservationRepo := repository.NewReservationRepository(pool)
+	idempotencyRepo := repository.NewIdempotencyRepository(pool)
+
+	itemSvc := service.NewItemService(itemRepo)
+	reservationSvc := service.NewReservationService(pool, itemRepo, reservationRepo, idempotencyRepo, reservationTTLSeconds)
+
+	itemsHandler := handler.NewItemsHandler(itemSvc)
+	reservationsHandler := handler.NewReservationsHandler(reservationSvc)
+
+	r := chi.NewRouter()
+	r.Use(chiware.RequestID)
+	r.Use(chiware.RealIP)
+	r.Use(chiware.Logger)
+	r.Use(chiware.Recoverer)
+	r.Use(chiware.Timeout(15 * time.Second))
+
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/items", itemsHandler.List)
+
+		r.Group(func(r chi.Router) {
+			r.Use(handler.RequireUserID)
+			r.Post("/reservations", reservationsHandler.Create)
+			r.Get("/reservations", reservationsHandler.ListMine)
+			r.Delete("/reservations/{id}", reservationsHandler.Release)
+		})
+	})
+
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		slog.InfoContext(ctx, "http server listening", "port", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("http server error", "err", err)
+			cancel()
+		}
+	}()
 
 	<-ctx.Done()
 	slog.InfoContext(context.Background(), "shutting down")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("http shutdown error", "err", err)
+	}
+
 	return nil
 }
 

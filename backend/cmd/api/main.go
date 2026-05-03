@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/cibersabueso/challengebeeyong/backend/internal/config"
+	"github.com/cibersabueso/challengebeeyong/backend/internal/expiry"
 	"github.com/cibersabueso/challengebeeyong/backend/internal/handler"
 	"github.com/cibersabueso/challengebeeyong/backend/internal/platform"
 	"github.com/cibersabueso/challengebeeyong/backend/internal/repository"
@@ -70,6 +71,13 @@ func run() error {
 
 	itemSvc := service.NewItemService(itemRepo)
 	reservationSvc := service.NewReservationService(pool, itemRepo, reservationRepo, idempotencyRepo, reservationTTLSeconds)
+	expirySvc := expiry.NewService(reservationRepo, idempotencyRepo, cfg.ExpiryIntervalSeconds)
+
+	if err := expirySvc.Bootstrap(ctx); err != nil {
+		return fmt.Errorf("bootstrap expiry: %w", err)
+	}
+
+	go expirySvc.Loop(ctx)
 
 	itemsHandler := handler.NewItemsHandler(itemSvc)
 	reservationsHandler := handler.NewReservationsHandler(reservationSvc)

@@ -1,0 +1,432 @@
+openapi: 3.1.0
+
+info:
+  title: Inventory Reservation API
+  version: 1.0.0
+  description: |
+    HTTP contract for the Inventory Reservation System. Provides atomic, idempotent
+    reservations of inventory items with a fixed 60-second TTL. Designed for
+    flash-sale workloads with strong correctness guarantees under concurrency.
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development server
+
+tags:
+  - name: items
+    description: Inventory queries
+  - name: reservations
+    description: Reservation lifecycle (create, list, release)
+
+paths:
+  /items:
+    get:
+      operationId: listItems
+      tags: [items]
+      summary: List all items with current stock
+      description: Returns every item with its total, reserved and computed available stock.
+      responses:
+        '200':
+          description: Array of items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Item'
+              examples:
+                two-items:
+                  summary: Catalog with two items
+                  value:
+                    - id: 8f1d2e6a-3c4b-4f1a-9e3a-1a2b3c4d5e6f
+                      name: Limited Edition Sneaker
+                      total: 100
+                      reserved: 37
+                      available: 63
+                    - id: 1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e60
+                      name: Collector Vinyl
+                      total: 50
+                      reserved: 50
+                      available: 0
+
+  /reservations:
+    post:
+      operationId: createReservation
+      tags: [reservations]
+      summary: Create a new reservation
+      description: |
+        Atomically reserves `quantity` units of an item for the user identified by
+        `X-User-Id`. Requires an `Idempotency-Key` header. The reservation expires
+        automatically after 60 seconds unless explicitly released.
+      parameters:
+        - $ref: '#/components/parameters/UserIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReservationCreateRequest'
+            examples:
+              valid:
+                summary: Reserve 2 units
+                value:
+                  item_id: 8f1d2e6a-3c4b-4f1a-9e3a-1a2b3c4d5e6f
+                  quantity: 2
+      responses:
+        '201':
+          description: Reservation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+              examples:
+                created:
+                  summary: New active reservation
+                  value:
+                    id: 4b5a6c7d-8e9f-4a1b-bc2d-3e4f5a6b7c8d
+                    item_id: 8f1d2e6a-3c4b-4f1a-9e3a-1a2b3c4d5e6f
+                    user_id: 9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d
+                    quantity: 2
+                    status: active
+                    expires_at: '2026-05-02T12:01:00Z'
+                    created_at: '2026-05-02T12:00:00Z'
+                    released_at: null
+        '200':
+          description: Idempotent replay; returns the original reservation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reservation'
+              examples:
+                replay:
+                  summary: Same Idempotency-Key, same payload
+                  value:
+                    id: 4b5a6c7d-8e9f-4a1b-bc2d-3e4f5a6b7c8d
+                    item_id: 8f1d2e6a-3c4b-4f1a-9e3a-1a2b3c4d5e6f
+                    user_id: 9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d
+                    quantity: 2
+                    status: active
+                    expires_at: '2026-05-02T12:01:00Z'
+                    created_at: '2026-05-02T12:00:00Z'
+                    released_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+    get:
+      operationId: listUserReservations
+      tags: [reservations]
+      summary: List active reservations for the current user
+      description: Returns reservations in `active` status owned by the user identified by `X-User-Id`.
+      parameters:
+        - $ref: '#/components/parameters/UserIdHeader'
+      responses:
+        '200':
+          description: Array of active reservations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Reservation'
+              examples:
+                two-active:
+                  summary: User with two active reservations
+                  value:
+                    - id: 4b5a6c7d-8e9f-4a1b-bc2d-3e4f5a6b7c8d
+                      item_id: 8f1d2e6a-3c4b-4f1a-9e3a-1a2b3c4d5e6f
+                      user_id: 9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d
+                      quantity: 2
+                      status: active
+                      expires_at: '2026-05-02T12:01:00Z'
+                      created_at: '2026-05-02T12:00:00Z'
+                      released_at: null
+                    - id: a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d
+                      item_id: 1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e60
+                      user_id: 9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d
+                      quantity: 1
+                      status: active
+                      expires_at: '2026-05-02T12:01:30Z'
+                      created_at: '2026-05-02T12:00:30Z'
+                      released_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /reservations/{id}:
+    delete:
+      operationId: releaseReservation
+      tags: [reservations]
+      summary: Release a reservation
+      description: |
+        Releases the reservation, returning its quantity to the item's available pool.
+        Idempotent: repeated calls return a consistent response and the stock is
+        returned exactly once.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Reservation identifier (UUID v4)
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/UserIdHeader'
+      responses:
+        '200':
+          description: Reservation released, or already released previously
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseResponse'
+              examples:
+                released:
+                  summary: First release
+                  value:
+                    status: released
+                    reservation_id: 4b5a6c7d-8e9f-4a1b-bc2d-3e4f5a6b7c8d
+                    released_at: '2026-05-02T12:00:42Z'
+                already-released:
+                  summary: Subsequent release
+                  value:
+                    status: already_released
+                    reservation_id: 4b5a6c7d-8e9f-4a1b-bc2d-3e4f5a6b7c8d
+                    released_at: '2026-05-02T12:00:42Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+
+components:
+
+  parameters:
+    UserIdHeader:
+      name: X-User-Id
+      in: header
+      required: true
+      description: Client-generated UUID v4 identifying the user. No authentication implied.
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Opaque string, max 256 characters. Guarantees the operation is applied at most once.
+      schema:
+        type: string
+        maxLength: 256
+        minLength: 1
+
+  schemas:
+
+    Status:
+      type: string
+      enum:
+        - active
+        - released
+        - expired
+
+    Item:
+      type: object
+      required: [id, name, total, reserved, available]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        total:
+          type: integer
+          minimum: 0
+        reserved:
+          type: integer
+          minimum: 0
+        available:
+          type: integer
+          minimum: 0
+
+    Reservation:
+      type: object
+      required: [id, item_id, user_id, quantity, status, expires_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        item_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+        status:
+          $ref: '#/components/schemas/Status'
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        released_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ReservationCreateRequest:
+      type: object
+      required: [item_id, quantity]
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+
+    ReservationResponse:
+      $ref: '#/components/schemas/Reservation'
+
+    ReleaseResponse:
+      type: object
+      required: [status, reservation_id]
+      properties:
+        status:
+          type: string
+          enum:
+            - released
+            - already_released
+        reservation_id:
+          type: string
+          format: uuid
+        released_at:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - OUT_OF_STOCK
+            - IDEMPOTENCY_CONFLICT
+            - RESERVATION_EXPIRED
+            - RESERVATION_NOT_FOUND
+            - RESERVATION_ALREADY_RELEASED
+            - INVALID_QUANTITY
+            - ITEM_NOT_FOUND
+            - INVALID_USER_ID
+            - MISSING_IDEMPOTENCY_KEY
+            - INVALID_IDEMPOTENCY_KEY
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+  responses:
+
+    BadRequest:
+      description: Invalid input or missing required headers
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalid-quantity:
+              summary: Quantity is zero or negative
+              value:
+                code: INVALID_QUANTITY
+                message: quantity must be a positive integer
+                details:
+                  received: 0
+            missing-idempotency-key:
+              summary: Idempotency-Key header missing
+              value:
+                code: MISSING_IDEMPOTENCY_KEY
+                message: Idempotency-Key header is required
+            invalid-user-id:
+              summary: X-User-Id missing or not a UUID v4
+              value:
+                code: INVALID_USER_ID
+                message: X-User-Id header must be a valid UUID v4
+
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            item-not-found:
+              summary: Item id unknown
+              value:
+                code: ITEM_NOT_FOUND
+                message: item not found
+                details:
+                  item_id: 00000000-0000-4000-8000-000000000000
+            reservation-not-found:
+              summary: Reservation id unknown
+              value:
+                code: RESERVATION_NOT_FOUND
+                message: reservation not found
+                details:
+                  reservation_id: 00000000-0000-4000-8000-000000000000
+
+    Conflict:
+      description: Stock conflict; insufficient available units
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            out-of-stock:
+              summary: Not enough available stock
+              value:
+                code: OUT_OF_STOCK
+                message: not enough stock to fulfill reservation
+                details:
+                  item_id: 8f1d2e6a-3c4b-4f1a-9e3a-1a2b3c4d5e6f
+                  requested: 5
+                  available: 2
+
+    Gone:
+      description: Reservation already expired
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            expired:
+              summary: TTL elapsed
+              value:
+                code: RESERVATION_EXPIRED
+                message: reservation has expired and stock was already returned to the pool
+                details:
+                  reservation_id: 4b5a6c7d-8e9f-4a1b-bc2d-3e4f5a6b7c8d
+                  expired_at: '2026-05-02T12:01:00Z'
+
+    UnprocessableEntity:
+      description: Idempotency key reused with a different payload
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            idempotency-conflict:
+              summary: Same key, different payload
+              value:
+                code: IDEMPOTENCY_CONFLICT
+                message: Idempotency-Key was previously used with a different payload
+                details:
+                  key: client-retry-001
